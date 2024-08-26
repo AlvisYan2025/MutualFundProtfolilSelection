@@ -13,11 +13,22 @@ import seaborn as sns
 import tensorflow as tf
 import pickle
 import sys 
+import time 
+import datetime
 
 all_prediction_groups = []
+base = '/scratch/lz2692/equityml_data/'
+identifier = str(int(time.time()))
 def main(args):
     lr = float(args[1])
     epochs = int(args[2])
+    def log_cross_validation(identifier, params_dict):
+        ts = time.time()
+        st = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S:%f')
+        with open(base, "a") as f:
+            f.write("{}|||{}|||{}|||{}|||{}".format(st, identifier, params_dict.__repr__()))
+            f.write("\n")
+    log_cross_validation(identifier, {'lr':lr, "epoch":epochs})
     with open('data.pkl', 'rb') as file:
         all_data = pickle.load(file)
 
@@ -355,7 +366,7 @@ def main(args):
     df = sanitize_input(add_invalid_label_mask(df))
     df['label'] = df['label'] * 100 
     #all_model_groups = [] #saves all trained model from each group of 3 
-    def run_group_model(variables, model_config, num_group, save=False):
+    def run_group_model(variables, model_config, num_group, save=True):
         '''
         train one group of 3 models.
         variables: selected variables (fund-specific + sentiment)
@@ -396,7 +407,7 @@ def main(args):
             model.train_model(num_epochs, train_loader, valid_loader,learning_rate=lr, early_stop=False, graph=True)
             all_models.append(model)
             if save:
-                torch.save(model, f'trainedModels/group{num_group}model{i}')
+                torch.save(model, base+f'model{i}'+identifier)
             #predict with trained model 
             output = model.predict(get_tensor_from_df(df[df['Timestep'].isin(test_idx)], variables, False))
             all_predictions.append(output)
@@ -411,9 +422,9 @@ def main(args):
         'lr': lr,
         'num_epochs': epochs
     }
-    group_number = 8
+    group_number = 1
     for i in range (group_number):
-        run_group_model(variables, model_config, i+1, save=False)
+        run_group_model(variables, model_config, i+1, save=True)
     curr_prediction = get_mean_elementwise(all_prediction_groups)
     df['prediction'] = curr_prediction.flatten()
     #rank df based on prediction 
@@ -477,6 +488,7 @@ def main(args):
         plt.ylabel('Cumulative Abnormal Return' if cumulative else 'Return')
         plt.title('Cumulative Abnormal Returns Over Time' if cumulative else 'Abnormal Returns Over Time')
         plt.suptitle('Prediction-weighted' if pred_weight else 'Equally-weighted', fontsize=9, y=0.87)
+        plt.savefig(base+"plot.png"+identifier, dpi=300, bbox_inches='tight')
         plt.ylim(-1.5, 1.5)
         plt.legend()
         plt.grid(True)
