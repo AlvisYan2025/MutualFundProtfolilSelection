@@ -1,3 +1,5 @@
+#!/scratch/lz2692/conda_env/pytorch/bin/python
+
 import numpy as np
 import pandas as pd
 import os
@@ -10,26 +12,245 @@ from pandas.tseries.offsets import MonthEnd
 from torch.utils.data import Dataset, DataLoader
 import statistics
 import seaborn as sns
-import tensorflow as tf
 import pickle
 import sys 
 import time 
 import datetime
+import os
+
+
 
 all_prediction_groups = []
 base = '/scratch/lz2692/equityml_data/'
-identifier = str(int(time.time()))
+
+identifier = str(int(time.time())) + os.environ['JOB_ID'][-3:]
+
+def get_tensor_from_df(df, variables, skip= True):
+    #take varibales according to input column names, return a tensor of shape [funds*time, varibles]
+    #skip: whether or not to skip rows in which mask is false 
+    if skip:
+        df = df[df['mask']]
+    data = df[variables].to_numpy()
+    tensor = torch.tensor(data, dtype=torch.float32)
+    return tensor
+def add_prediction(df, predictions):
+    #add predictions to the input df 
+    #output df has extra column predictions 
+    new_df = df.copy()
+    new_df['prediction'] = predictions.flatten()
+    return new_df
+
+def get_mean_elementwise(tensor_list):
+    stacked_tensors = torch.stack(tensor_list)
+    mean_tensor = torch.mean(stacked_tensors, dim=0)
+    return mean_tensor
+def shitty_algo(df,length_decile=10):
+    #a shitty algorithm that can help sort denciles
+    #funtions similar to qcut
+    df['decile'] = np.nan
+    for timestep, group in df.groupby('Timestep'):
+        group = group[group['mask'] != 0]
+        sorted_indices = np.argsort(group['prediction'].values)
+        num_decile = len(sorted_indices) // length_decile
+        for i in range(length_decile):
+            if i == length_decile - 1: 
+                df.loc[group.index[sorted_indices[-num_decile:]], 'decile'] = i
+            else:
+                df.loc[group.index[sorted_indices[i * num_decile:(i + 1) * num_decile]], 'decile'] = i
+    df['decile'] = df['decile'].fillna(-99)
+    df['decile'] = df['decile'].astype(int)
+    return df
+
+#pytorch dataset
+class DS(Dataset):
+    '''constrcuct datast with input data(the dataset) and index list'''
+    def __init__(self, df, time, variabels, skip=True):
+        #df-> input dataframe, time-> time index to select, variables-> variables to select
+        print('constructing dataset')
+        self.variabels = variabels
+        df = df[df['Timestep'].isin(time)]
+        if skip:
+            self.features = get_tensor_from_df(df,variabels, True)
+            self.labels = get_tensor_from_df(df, ['label'], True)
+        else:
+            self.features = get_tensor_from_df(df,variabels, False)
+            self.labels = get_tensor_from_df(df, ['label'], False)
+        self.length = self.features.shape[0]
+        print('features shape:', self.features.shape)
+        print('labels shape:', self.labels.shape)
+        print('-------------------------------------------------')
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        #timestep = self.features.shape[0] - idx #during training, go from past time (larger index) to future time (smaller index)
+        return self.features[idx], self.labels[idx] 
+    
+    
+class NeuralNet(nn.Module):
+    """
+    Neural network meta model
+    """
+
+    def __init__(self, input_dim, intermediate_dims=(20, 40, 20), dropout=0.9):
+
+        super(NeuralNet, self).__init__()
+        self.input_dim = input_dim
+        self.intermediate_dims = intermediate_dims
+        # define the number of hidden layers
+        self.hidden_num = len(intermediate_dims) + 1
+        self.dropout = dropout
+        self.output_dim = 1
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # define the first hidden layer
+        exec("self.hidden_layer1 = nn.Linear({}, {})".format(input_dim, intermediate_dims[0]))
+        # define the following hidden layers except for the last layer
+        for i in range(len(intermediate_dims) - 1):
+            exec(
+                "self.hidden_layer{} = nn.Linear({}, {})".format(i + 2, intermediate_dims[i], intermediate_dims[i + 1]))
+        # define the last hidden layer
+        exec("self.hidden_layer_last = nn.Linear({}, 1)".format(intermediate_dims[-1]))
+
+    def forward(self, x):
+        # use loop to determine the next hidden layers
+        for i in range(self.hidden_num - 1):
+            x = eval("self.hidden_layer{}(x)".format(1 + i))
+            x = F.relu(x)
+            x = nn.functional.dropout(x, p=self.dropout)
+
+        y = self.hidden_layer_last(x)
+        #y = torch.tanh(y)
+
+
+        return y
+
+    def __repr__(self):
+        return "NeuralNet(input_dim={}, output_dim={}, intermediate_dims={}, dropout={})".format(
+            self.input_dim.__repr__(), self.output_dim.__repr__(),
+            self.intermediate_dims.__repr__(), self.dropout.__repr__()
+        )
+    def plot(self, train_loss, validation_loss, train_std, val_std, num_epochs, title=''):
+        #plot the training graph
+        epochs = range(1, num_epochs + 1)
+        plt.figure(figsize=(10, 5))
+        plt.plot(epochs, train_loss, label='Train Loss', color='blue')
+        if train_std:
+            plt.fill_between(epochs, np.array(train_loss) - np.array(train_std), np.array(train_loss) + np.array(train_std), color='blue', alpha=0.2)
+        plt.plot(epochs, validation_loss, label='Validation Loss', color='orange')
+        if val_std:
+            plt.fill_between(epochs, np.array(validation_loss) - np.array(val_std), np.array(validation_loss) + np.array(val_std), color='orange', alpha=0.2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title(title + " Training and Validation Loss Trends")
+        plt.legend()
+        last_epoch = num_epochs
+        last_train_loss = train_loss[-1]
+        last_val_loss = validation_loss[-1]
+        plt.annotate(f'Train Loss: {last_train_loss:.2f}', 
+                    xy=(last_epoch, last_train_loss), 
+                    xytext=(last_epoch, last_train_loss + 0.05),
+                    arrowprops=dict(facecolor='blue', shrink=0.05),
+                    fontsize=10, color='blue')
+
+        plt.annotate(f'Validation Loss: {last_val_loss:.2f}', 
+                    xy=(last_epoch, last_val_loss), 
+                    xytext=(last_epoch, last_val_loss + 0.05),
+                    arrowprops=dict(facecolor='orange', shrink=0.05),
+                    fontsize=10, color='orange')
+        plt.savefig(base+"training_graph_{}.png".format(identifier), dpi=300, bbox_inches='tight')
+        plt.show()
+    def train_model(self, num_epochs, dataloader_train, dataloader_val, criterion = nn.MSELoss(), learning_rate=0.0025, early_stop=True, regl2=1e-3, graph=False):
+        '''train model with specified datasets'''
+        print('training start')
+        print('----------------------')
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        train_loss_avg = [] #average loss over all epochs 
+        validation_loss_avg =[] 
+        train_loss_std = [] #std of losses over all epochs
+        validation_loss_std = []
+        lossV= float('inf')
+        stop = False
+        for epoch in range(num_epochs):
+            train_loss = [] #inividual loss for a single epoch
+            validation_loss = []
+            self.train() 
+            running_loss = 0.0
+            for inputs, labels in dataloader_train:
+                inputs, labels = inputs.to(self.device), labels.to(self.device).float()
+                optimizer.zero_grad()
+                outputs = self(inputs)
+                loss = criterion(outputs, labels)
+                l2_reg = torch.tensor(0.)
+                for param in self.parameters():
+                    l2_reg = l2_reg + torch.norm(param, 2)
+                loss = loss + regl2 * l2_reg
+                loss.backward()
+                optimizer.step()
+                train_loss.append(loss.item())
+                running_loss += loss.item()
+            lossT = running_loss/len(dataloader_train)
+            train_loss_avg.append(lossT)
+            #train_loss_std.append(statistics.stdev(train_loss))
+            #validation
+            self.eval()
+            running_val_loss = 0.0
+            with torch.no_grad():
+                for inputs, labels in dataloader_val:
+                    inputs, labels = inputs.to(self.device), labels.to(self.device).float()
+                    outputs = self(inputs)
+                    loss = criterion(outputs, labels)
+                    l2_reg = torch.tensor(0.)
+                    for param in self.parameters():
+                        l2_reg = l2_reg + torch.norm(param, 2)
+                    loss = loss + regl2 * l2_reg
+                    validation_loss.append(loss.item())
+                    running_val_loss += loss.item()
+            if (running_val_loss / len(dataloader_val)>=lossV):
+                stop=True
+            lossV = running_val_loss / len(dataloader_val)
+            validation_loss_avg.append(lossV)
+            #validation_loss_std.append(statistics.stdev(validation_loss))
+            print(f"Epoch {epoch + 1}/{num_epochs}, Traning Loss: {lossT}, Validation loss: {lossV}")
+            if stop and early_stop:
+                print('validation stopped converging')
+                break 
+        if graph:
+            self.plot(train_loss_avg, validation_loss_avg, 0, 0, num_epochs)
+        return (train_loss_avg, validation_loss_avg, train_loss_std, validation_loss_std)
+    def predict(self, inputs):
+        #predict at all timestep using model. inputs --> [time, funds, X]
+        #return shape [time, funds, 1]
+        self.eval()
+        with torch.no_grad():
+            outputs = self(inputs)
+        #np.savetxt('sample.txt', outputs[:, :, -1], fmt='%s')
+        #np.savetxt('inputsample.txt', input_features[0,:,:])
+        return outputs
+    def reinitialize_with_glorot_uniform(self):
+        """
+        Reinitialize the parameters of the PyTorch model using TensorFlow's 
+        default initializer (glorot_uniform, or Xavier uniform).
+        """
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        self.apply(init_weights)
+
+
 def main(args):
     lr = float(args[1])
     epochs = int(args[2])
     def log_cross_validation(identifier, params_dict):
         ts = time.time()
         st = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S:%f')
-        with open(base, "a") as f:
-            f.write("{}|||{}|||{}|||{}|||{}".format(st, identifier, params_dict.__repr__()))
+        with open(base + "log.log", "a") as f:
+            f.write("{}|||{}|||{}".format(st, identifier, params_dict.__repr__()))
             f.write("\n")
     log_cross_validation(identifier, {'lr':lr, "epoch":epochs})
-    with open('data.pkl', 'rb') as file:
+    with open(base + 'data.pkl', 'rb') as file:
         all_data = pickle.load(file)
 
     #data-preprocess util funcitons 
@@ -102,41 +323,7 @@ def main(args):
             df[col] = df[col].fillna(mean_macro)
             df[col] = np.where((df[col] >= -90) & (df[col] <= 90), df[col], mean_macro)
         return df 
-    def get_tensor_from_df(df, variables, skip= True):
-        #take varibales according to input column names, return a tensor of shape [funds*time, varibles]
-        #skip: whether or not to skip rows in which mask is false 
-        if skip:
-            df = df[df['mask']]
-        data = df[variables].to_numpy()
-        tensor = torch.tensor(data, dtype=torch.float32)
-        return tensor
-    def add_prediction(df, predictions):
-        #add predictions to the input df 
-        #output df has extra column predictions 
-        new_df = df.copy()
-        new_df['prediction'] = predictions.flatten()
-        return new_df
 
-    def get_mean_elementwise(tensor_list):
-        stacked_tensors = torch.stack(tensor_list)
-        mean_tensor = torch.mean(stacked_tensors, dim=0)
-        return mean_tensor
-    def shitty_algo(df,length_decile=10):
-        #a shitty algorithm that can help sort denciles
-        #funtions similar to qcut
-        df['decile'] = np.nan
-        for timestep, group in df.groupby('Timestep'):
-            group = group[group['mask'] != 0]
-            sorted_indices = np.argsort(group['prediction'].values)
-            num_decile = len(sorted_indices) // length_decile
-            for i in range(length_decile):
-                if i == length_decile - 1: 
-                    df.loc[group.index[sorted_indices[-num_decile:]], 'decile'] = i
-                else:
-                    df.loc[group.index[sorted_indices[i * num_decile:(i + 1) * num_decile]], 'decile'] = i
-        df['decile'] = df['decile'].fillna(-99)
-        df['decile'] = df['decile'].astype(int)
-        return df
     #sampling util functions
     #part3.1: sampling schemes 
     def chronological_sampling_scheme(total_time_periods, split_ratio):
@@ -179,30 +366,7 @@ def main(args):
         part1 = data[:split_index]
         part2 = data[split_index:]
         return part1, part2
-    #pytorch dataset
-    class DS(Dataset):
-        '''constrcuct datast with input data(the dataset) and index list'''
-        def __init__(self, df, time, variabels, skip=True):
-            #df-> input dataframe, time-> time index to select, variables-> variables to select
-            print('constructing dataset')
-            self.variabels = variabels
-            df = df[df['Timestep'].isin(time)]
-            if skip:
-                self.features = get_tensor_from_df(df,variabels, True)
-                self.labels = get_tensor_from_df(df, ['label'], True)
-            else:
-                self.features = get_tensor_from_df(df,variabels, False)
-                self.labels = get_tensor_from_df(df, ['label'], False)
-            self.length = self.features.shape[0]
-            print('features shape:', self.features.shape)
-            print('labels shape:', self.labels.shape)
-            print('-------------------------------------------------')
-        def __len__(self):
-            return self.length
-        
-        def __getitem__(self, idx):
-            #timestep = self.features.shape[0] - idx #during training, go from past time (larger index) to future time (smaller index)
-            return self.features[idx], self.labels[idx] 
+
     def checkdb(dataset, dataloader):
         sample_features, sample_labels = dataset[0]
         print("Features shape:", sample_features.shape)
@@ -212,159 +376,10 @@ def main(args):
         batch_features, batch_labels = next(data_iter) 
         print("loader Features shape:", batch_features.shape)
         print("loader Labels shape:", batch_labels.shape)
-    class NeuralNet(nn.Module):
-        """
-        Neural network meta model
-        """
 
-        def __init__(self, input_dim, intermediate_dims=(20, 40, 20), dropout=0.9):
-
-            super(NeuralNet, self).__init__()
-            self.input_dim = input_dim
-            self.intermediate_dims = intermediate_dims
-            # define the number of hidden layers
-            self.hidden_num = len(intermediate_dims) + 1
-            self.dropout = dropout
-            self.output_dim = 1
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-            # define the first hidden layer
-            exec("self.hidden_layer1 = nn.Linear({}, {})".format(input_dim, intermediate_dims[0]))
-            # define the following hidden layers except for the last layer
-            for i in range(len(intermediate_dims) - 1):
-                exec(
-                    "self.hidden_layer{} = nn.Linear({}, {})".format(i + 2, intermediate_dims[i], intermediate_dims[i + 1]))
-            # define the last hidden layer
-            exec("self.hidden_layer_last = nn.Linear({}, 1)".format(intermediate_dims[-1]))
-
-        def forward(self, x):
-            # use loop to determine the next hidden layers
-            for i in range(self.hidden_num - 1):
-                x = eval("self.hidden_layer{}(x)".format(1 + i))
-                x = F.relu(x)
-                x = nn.functional.dropout(x, p=self.dropout)
-
-            y = self.hidden_layer_last(x)
-            #y = torch.tanh(y)
-
-
-            return y
-
-        def __repr__(self):
-            return "NeuralNet(input_dim={}, output_dim={}, intermediate_dims={}, dropout={})".format(
-                self.input_dim.__repr__(), self.output_dim.__repr__(),
-                self.intermediate_dims.__repr__(), self.dropout.__repr__()
-            )
-        def plot(self, train_loss, validation_loss, train_std, val_std, num_epochs, title=''):
-            #plot the training graph
-            epochs = range(1, num_epochs + 1)
-            plt.figure(figsize=(10, 5))
-            plt.plot(epochs, train_loss, label='Train Loss', color='blue')
-            if train_std:
-                plt.fill_between(epochs, np.array(train_loss) - np.array(train_std), np.array(train_loss) + np.array(train_std), color='blue', alpha=0.2)
-            plt.plot(epochs, validation_loss, label='Validation Loss', color='orange')
-            if val_std:
-                plt.fill_between(epochs, np.array(validation_loss) - np.array(val_std), np.array(validation_loss) + np.array(val_std), color='orange', alpha=0.2)
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.title(title + " Training and Validation Loss Trends")
-            plt.legend()
-            last_epoch = num_epochs
-            last_train_loss = train_loss[-1]
-            last_val_loss = validation_loss[-1]
-            plt.annotate(f'Train Loss: {last_train_loss:.2f}', 
-                        xy=(last_epoch, last_train_loss), 
-                        xytext=(last_epoch, last_train_loss + 0.05),
-                        arrowprops=dict(facecolor='blue', shrink=0.05),
-                        fontsize=10, color='blue')
-            
-            plt.annotate(f'Validation Loss: {last_val_loss:.2f}', 
-                        xy=(last_epoch, last_val_loss), 
-                        xytext=(last_epoch, last_val_loss + 0.05),
-                        arrowprops=dict(facecolor='orange', shrink=0.05),
-                        fontsize=10, color='orange')
-            plt.show()
-        def train_model(self, num_epochs, dataloader_train, dataloader_val, criterion = nn.MSELoss(), learning_rate=0.0025, early_stop=True, regl2=1e-3, graph=False):
-            '''train model with specified datasets'''
-            print('training start')
-            print('----------------------')
-            optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-            train_loss_avg = [] #average loss over all epochs 
-            validation_loss_avg =[] 
-            train_loss_std = [] #std of losses over all epochs
-            validation_loss_std = []
-            lossV= float('inf')
-            stop = False
-            for epoch in range(num_epochs):
-                train_loss = [] #inividual loss for a single epoch
-                validation_loss = []
-                self.train() 
-                running_loss = 0.0
-                for inputs, labels in dataloader_train:
-                    inputs, labels = inputs.to(self.device), labels.to(self.device).float()
-                    optimizer.zero_grad()
-                    outputs = self(inputs)
-                    loss = criterion(outputs, labels)
-                    l2_reg = torch.tensor(0.)
-                    for param in self.parameters():
-                        l2_reg = l2_reg + torch.norm(param, 2)
-                    loss = loss + regl2 * l2_reg
-                    loss.backward()
-                    optimizer.step()
-                    train_loss.append(loss.item())
-                    running_loss += loss.item()
-                lossT = running_loss/len(dataloader_train)
-                train_loss_avg.append(lossT)
-                #train_loss_std.append(statistics.stdev(train_loss))
-                #validation
-                self.eval()
-                running_val_loss = 0.0
-                with torch.no_grad():
-                    for inputs, labels in dataloader_val:
-                        inputs, labels = inputs.to(self.device), labels.to(self.device).float()
-                        outputs = self(inputs)
-                        loss = criterion(outputs, labels)
-                        l2_reg = torch.tensor(0.)
-                        for param in self.parameters():
-                            l2_reg = l2_reg + torch.norm(param, 2)
-                        loss = loss + regl2 * l2_reg
-                        validation_loss.append(loss.item())
-                        running_val_loss += loss.item()
-                if (running_val_loss / len(dataloader_val)>=lossV):
-                    stop=True
-                lossV = running_val_loss / len(dataloader_val)
-                validation_loss_avg.append(lossV)
-                #validation_loss_std.append(statistics.stdev(validation_loss))
-                print(f"Epoch {epoch + 1}/{num_epochs}, Traning Loss: {lossT}, Validation loss: {lossV}")
-                if stop and early_stop:
-                    print('validation stopped converging')
-                    break 
-            if graph:
-                self.plot(train_loss_avg, validation_loss_avg, 0, 0, num_epochs)
-            return (train_loss_avg, validation_loss_avg, train_loss_std, validation_loss_std)
-        def predict(self, inputs):
-            #predict at all timestep using model. inputs --> [time, funds, X]
-            #return shape [time, funds, 1]
-            self.eval()
-            with torch.no_grad():
-                outputs = self(inputs)
-            #np.savetxt('sample.txt', outputs[:, :, -1], fmt='%s')
-            #np.savetxt('inputsample.txt', input_features[0,:,:])
-            return outputs
-        def reinitialize_with_glorot_uniform(self):
-            """
-            Reinitialize the parameters of the PyTorch model using TensorFlow's 
-            default initializer (glorot_uniform, or Xavier uniform).
-            """
-            def init_weights(m):
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-            self.apply(init_weights)
     df = convert_to_df(all_data)
     df = sanitize_input(add_invalid_label_mask(df))
-    df['label'] = df['label'] * 100 
+    df['label'] = df['label'] 
     #all_model_groups = [] #saves all trained model from each group of 3 
     def run_group_model(variables, model_config, num_group, save=True):
         '''
@@ -407,7 +422,7 @@ def main(args):
             model.train_model(num_epochs, train_loader, valid_loader,learning_rate=lr, early_stop=False, graph=True)
             all_models.append(model)
             if save:
-                torch.save(model, base+f'model{i}'+identifier)
+                torch.save(model, base + 'model{}'.format(i) + identifier)
             #predict with trained model 
             output = model.predict(get_tensor_from_df(df[df['Timestep'].isin(test_idx)], variables, False))
             all_predictions.append(output)
@@ -457,8 +472,8 @@ def main(args):
                 results.append({
                     'timestep': timestep,
                     'decile': decile,
-                    'return_equal': return_equal/100,
-                    'return_pred': return_pred.item()/100
+                    'return_equal': return_equal,
+                    'return_pred': return_pred.item()
                 })
         result_df = pd.DataFrame(results)
         return result_df
@@ -467,6 +482,7 @@ def main(args):
     def plot_returns(df, method, cumulative=True, pred_weight = False):
         #df -> [timestep, decile, return_equal, return_pred]
         # for each decile, plot the return across all timesteps
+        plt.figure(figsize=(10, 5))
         for i in range (10):
             df_decile = df[df['decile'] == i]
             df_decile = df_decile.sort_values('timestep')
@@ -488,7 +504,7 @@ def main(args):
         plt.ylabel('Cumulative Abnormal Return' if cumulative else 'Return')
         plt.title('Cumulative Abnormal Returns Over Time' if cumulative else 'Abnormal Returns Over Time')
         plt.suptitle('Prediction-weighted' if pred_weight else 'Equally-weighted', fontsize=9, y=0.87)
-        plt.savefig(base+"plot.png"+identifier, dpi=300, bbox_inches='tight')
+        plt.savefig(base+"plot_{}.png".format(identifier), dpi=300, bbox_inches='tight')
         plt.ylim(-1.5, 1.5)
         plt.legend()
         plt.grid(True)
@@ -496,3 +512,4 @@ def main(args):
     plot_returns(df_monthly_return, method='sum', pred_weight=True)
 if __name__=='__main__':
     main(sys.argv)
+    print(os.system('grep VmPeak /proc/$PPID/status'))
