@@ -257,7 +257,7 @@ class NeuralNet(nn.Module):
 ##########################################################################calculate sensitivity 
 def main(args): 
     identifier = args[1]
-    root = sys.argv[2] if len(sys.argv) > 2 else ''
+    root = sys.argv[2] if len(sys.argv) > 2 else '/scratch/lz2692/equityml_data/'
     def get_out_of_sample_derivative(model, feature, input_timesteps, df): #
         #get outofsample derivative for one model with corresponding feature
         allfeatures = ['ages', 'flow',
@@ -302,7 +302,7 @@ def main(args):
     sensum = df_features_sensitivity['sensitivity'].sum()
     df_features_sensitivity['sensitivity_normalized'] = df_features_sensitivity['sensitivity']/sensum
     #make_sensitivity_graph(df_features_sensitivity)
-    df_features_sensitivity.to_csv(f'{identifier}_sensitivity.csv', index=False)
+    df_features_sensitivity.to_csv(f'{root}{identifier}_sensitivity.csv', index=False)
     return df_features_sensitivity
 
 if __name__=='__main__':
