@@ -264,7 +264,7 @@ def main(args):
             'exp_ratio', 'tna', 'turnover', 'Family_TNA', 'fund_no',
             'Family_r12_2', 'Family_flow', 'Family_age', 'F_ST_Rev', 'F_r2_1',
             'F_r12_2', 'sentiment']
-        diff= 0.001
+        diff= 1e-5
         input_tensor = get_tensor_from_df(df[df['Timestep'].isin(input_timesteps)], allfeatures, False)
         output = model.predict(input_tensor)
         df_plus = df.copy()
@@ -272,7 +272,6 @@ def main(args):
         input_tensor_plus = get_tensor_from_df(df_plus[df_plus['Timestep'].isin(input_timesteps)], allfeatures, False)
         output_plus = model.predict(input_tensor_plus)
         output_diff = (output_plus - output)/diff
-        print(output_diff)
         return output_diff
 
     all_folds = chronological_sampling_scheme(469, [1,1,1])
