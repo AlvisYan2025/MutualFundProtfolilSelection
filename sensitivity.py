@@ -281,7 +281,7 @@ def main(args):
             'F_r12_2', 'sentiment'] 
     df_features_sensitivity = pd.DataFrame(list_features, columns=['variables'])
     df_features_sensitivity['sensitivity'] = None
-    for curr_feature in list_features:
+    for curr_feature in tqdm(list_features):
         group_mean = []
         for i in range (1): #i->group number
             df_block  = convert_to_df(all_data)
