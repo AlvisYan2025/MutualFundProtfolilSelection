@@ -160,9 +160,9 @@ class NeuralNet(nn.Module):
                     xytext=(last_epoch, last_val_loss + 0.05),
                     arrowprops=dict(facecolor='orange', shrink=0.05),
                     fontsize=10, color='orange')
-        plt.savefig(base+"training_graph_{}.png".format(identifier), dpi=300, bbox_inches='tight')
+        plt.savefig(base+"training_graph_{}_{}.png".format(title, identifier), dpi=300, bbox_inches='tight')
         plt.show()
-    def train_model(self, num_epochs, dataloader_train, dataloader_val, criterion = nn.MSELoss(), learning_rate=0.0025, early_stop=True, regl2=0.001, graph=False):
+    def train_model(self, num_epochs, dataloader_train, dataloader_val, criterion = nn.MSELoss(), learning_rate=0.0025, early_stop=True, regl2=0.001, graph=False, title = ''):
         '''train model with specified datasets'''
         print('training start')
         print('----------------------')
@@ -217,7 +217,7 @@ class NeuralNet(nn.Module):
                 print('validation stopped converging')
                 break 
         if graph:
-            self.plot(train_loss_avg, validation_loss_avg, 0, 0, num_epochs)
+            self.plot(train_loss_avg, validation_loss_avg, 0, 0, num_epochs, title=f'{title}')
         return (train_loss_avg, validation_loss_avg, train_loss_std, validation_loss_std)
     def predict(self, inputs):
         #predict at all timestep using model. inputs --> [time, funds, X]
@@ -421,7 +421,7 @@ def main(args):
             num_epochs = model_config['num_epochs']
             model = NeuralNet(input_dim=input_dim, intermediate_dims=hidden_dims, dropout=dropout) 
             model.reinitialize_with_glorot_uniform()
-            model.train_model(num_epochs, train_loader, valid_loader,learning_rate=lr, early_stop=False, graph=True)
+            model.train_model(num_epochs, train_loader, valid_loader,learning_rate=lr, early_stop=False, graph=True, title=f'{i}')
             all_models.append(model)
             if save:
                 torch.save(model, base + 'model{}'.format(i) + identifier)
