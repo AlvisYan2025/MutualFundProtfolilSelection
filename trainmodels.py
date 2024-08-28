@@ -93,35 +93,37 @@ class NeuralNet(nn.Module):
     """
 
     def __init__(self, input_dim, intermediate_dims=(20, 40, 20), dropout=0.9):
-
         super(NeuralNet, self).__init__()
         self.input_dim = input_dim
         self.intermediate_dims = intermediate_dims
         # define the number of hidden layers
         self.hidden_num = len(intermediate_dims) + 1
         self.dropout = dropout
-        self.output_dim = 1
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # self.dropout_layer = nn.Dropout(self.dropout)
 
         # define the first hidden layer
         exec("self.hidden_layer1 = nn.Linear({}, {})".format(input_dim, intermediate_dims[0]))
+        exec("self.dropout1 = nn.Dropout(p={})".format(dropout))
+
         # define the following hidden layers except for the last layer
         for i in range(len(intermediate_dims) - 1):
             exec(
                 "self.hidden_layer{} = nn.Linear({}, {})".format(i + 2, intermediate_dims[i], intermediate_dims[i + 1]))
+            exec("self.dropout{} = nn.Dropout(p={})".format(i + 2, dropout))
         # define the last hidden layer
         exec("self.hidden_layer_last = nn.Linear({}, 1)".format(intermediate_dims[-1]))
 
     def forward(self, x):
         # use loop to determine the next hidden layers
+
         for i in range(self.hidden_num - 1):
             x = eval("self.hidden_layer{}(x)".format(1 + i))
             x = F.relu(x)
-            x = nn.functional.dropout(x, p=self.dropout)
+            x = eval('self.dropout{}(x)'.format(i + 1))
 
         y = self.hidden_layer_last(x)
         #y = torch.tanh(y)
-
 
         return y
 
@@ -164,7 +166,7 @@ class NeuralNet(nn.Module):
         '''train model with specified datasets'''
         print('training start')
         print('----------------------')
-        optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        optimizer = optim.Adam(self.parameters(), lr=learning_rate, weight_decay=regl2)
         train_loss_avg = [] #average loss over all epochs 
         validation_loss_avg =[] 
         train_loss_std = [] #std of losses over all epochs
@@ -181,9 +183,9 @@ class NeuralNet(nn.Module):
                 optimizer.zero_grad()
                 outputs = self(inputs)
                 loss = criterion(outputs, labels)
-                all_params = torch.cat([x.view(-1) for x in self.parameters()])
-                l2_regularization = regl2 * torch.norm(all_params, 2)
-                loss = loss + l2_regularization
+                #all_params = torch.cat([x.view(-1) for x in self.parameters()])
+                #l2_regularization = regl2 * torch.norm(all_params, 2)
+                #loss = loss + l2_regularization
                 loss.backward()
                 optimizer.step()
                 train_loss.append(loss.item())
@@ -199,10 +201,10 @@ class NeuralNet(nn.Module):
                     inputs, labels = inputs.to(self.device), labels.to(self.device).float()
                     outputs = self(inputs)
                     loss = criterion(outputs, labels)
-                    l2_reg = torch.tensor(0.)
-                    for param in self.parameters():
-                        l2_reg = l2_reg + torch.norm(param, 2)
-                    loss = loss + regl2 * l2_reg
+                    #l2_reg = torch.tensor(0.)
+                    #for param in self.parameters():
+                    #    l2_reg = l2_reg + torch.norm(param, 2)
+                    #loss = loss + regl2 * l2_reg
                     validation_loss.append(loss.item())
                     running_val_loss += loss.item()
             if (running_val_loss / len(dataloader_val)>=lossV):
@@ -221,6 +223,7 @@ class NeuralNet(nn.Module):
         #predict at all timestep using model. inputs --> [time, funds, X]
         #return shape [time, funds, 1]
         self.eval()
+        #self.dropout = 0.0
         with torch.no_grad():
             outputs = self(inputs)
         #np.savetxt('sample.txt', outputs[:, :, -1], fmt='%s')
