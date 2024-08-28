@@ -160,7 +160,7 @@ class NeuralNet(nn.Module):
                     fontsize=10, color='orange')
         plt.savefig(base+"training_graph_{}.png".format(identifier), dpi=300, bbox_inches='tight')
         plt.show()
-    def train_model(self, num_epochs, dataloader_train, dataloader_val, criterion = nn.MSELoss(), learning_rate=0.0025, early_stop=True, regl2=1e-3, graph=False):
+    def train_model(self, num_epochs, dataloader_train, dataloader_val, criterion = nn.MSELoss(), learning_rate=0.0025, early_stop=True, regl2=0.001, graph=False):
         '''train model with specified datasets'''
         print('training start')
         print('----------------------')
@@ -181,10 +181,9 @@ class NeuralNet(nn.Module):
                 optimizer.zero_grad()
                 outputs = self(inputs)
                 loss = criterion(outputs, labels)
-                l2_reg = torch.tensor(0.)
-                for param in self.parameters():
-                    l2_reg = l2_reg + torch.norm(param, 2)
-                loss = loss + regl2 * l2_reg
+                all_params = torch.cat([x.view(-1) for x in self.parameters()])
+                l2_regularization = regl2 * torch.norm(all_params, 2)
+                loss = loss + l2_regularization
                 loss.backward()
                 optimizer.step()
                 train_loss.append(loss.item())
